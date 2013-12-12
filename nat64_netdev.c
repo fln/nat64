@@ -85,7 +85,7 @@ static void nat64_netdev_setup(struct net_device *dev)
 	dev->hard_header_len = 0;
 	dev->addr_len = 0;
 	dev->mtu = ETH_DATA_LEN;
-	dev->features = NETIF_F_NETNS_LOCAL | NETIF_F_NO_CSUM;
+	dev->features = NETIF_F_NETNS_LOCAL;
 	dev->flags = IFF_NOARP | IFF_POINTOPOINT;
 }
 
@@ -115,6 +115,6 @@ void nat64_netdev_destroy(struct net_device *dev)
 {
 	unregister_netdev(dev);
 
-	printk("NAT64: Destroying nat64 device.\n");
+	printk("nat64: Destroying nat64 device.\n");
 }
 

@@ -11,7 +11,7 @@ int tcp_timeout_fsm(struct session_entry *session)
 	return 0;
 }
 
-void tcp4_fsm(struct session_entry *session, struct tcphdr *tcph)
+void tcp4_fsm(struct session_entry *session, const struct tcphdr *tcph)
 {
 //	printk("nat64: [fsm4] Got packet state %d.\n", session->state);
 
@@ -61,7 +61,7 @@ void tcp4_fsm(struct session_entry *session, struct tcphdr *tcph)
 	}
 }
 
-void tcp6_fsm(struct session_entry *session, struct tcphdr *tcph)
+void tcp6_fsm(struct session_entry *session, const struct tcphdr *tcph)
 {
 //	printk("nat64: [fsm6] Got packet state %d.\n", session->state);
 

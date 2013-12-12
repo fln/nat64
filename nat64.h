@@ -63,7 +63,7 @@ extern struct expiry_q	expiry_base[NUM_EXPIRY_QUEUES];
 extern struct kmem_cache	*session_cache;
 extern struct kmem_cache	*bib_cache;
 extern struct list_head		exipry_queue;
-extern struct net_device	*nat64_v4_dev;
+//extern struct net_device	*nat64_v4_dev;
 extern struct net_device	*nat64_dev;
 
 extern struct hlist_head	*hash6;

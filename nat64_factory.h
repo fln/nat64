@@ -20,50 +20,6 @@
 
 //#define NAT64_NETDEV_NAME "nat64"
 
-static inline int route_ipv4_away(struct sk_buff *skb, __be16 sport, __be16 dport)
-{
-	int		ret_val;
-	struct iphdr	*iph = ip_hdr(skb);
-	struct rtable	*rp;
-	struct flowi	fl = {
-		.oif = 0,
-		.mark = 0, // sk->sk_mark,
-		.nl_u = {
-			.ip4_u =
-			{
-				.daddr = iph->daddr,
-				.saddr = iph->saddr,
-				.tos = iph->tos
-			}
-		},
-		.proto = skb->protocol,
-		.flags = 0,	// or can be FLOWI_FLAG_ANYSRC ??
-		.uli_u = {
-			.ports =
-			{
-				.sport = sport,
-				.dport = dport
-			}
-		}
-	};
-
-	skb->dev = nat64_v4_dev;
-	ret_val = __ip_route_output_key(dev_net(skb->dev), &rp, &fl);
-
-	if(ret_val) {
-		printk("NAT64: Unable to determine route (%pI4:%hu %hu %pI4:%hu) to destination for new IPv4 packet (errorcode %d)\n", &iph->saddr, ntohs(sport), iph->tos, &iph->daddr, ntohs(dport), ret_val);
-		return -1;
-	}
-
-	skb_dst_set(skb, dst_clone(&rp->u.dst));
-
-	//printk("nat64: [ipv6] Sending translated IPv4 packet.\n");
-	nat64_dev->stats.tx_packets++;
-	nat64_dev->stats.tx_bytes += skb->len;
-	dst_output(skb);
-	return 0;
-}
-
 static inline void csum_inv_add(__be16 *sum, __be16 *start, __be16 *end)
 {
 	__be32	new_sum;
@@ -113,8 +69,10 @@ static inline void factory_translate_ip4(struct sk_buff *src, struct sk_buff *ds
 	ip6h->nexthdr	= nexthdr;
 	ip6h->hop_limit = iph->ttl;
 	//assemble_ipv6(&ip6h->saddr, iph->saddr);
-	ipv6_addr_copy(&ip6h->saddr, saddr);
-	ipv6_addr_copy(&ip6h->daddr, daddr);
+	//ipv6_addr_copy(&ip6h->saddr, saddr);
+	ip6h->saddr = *saddr;
+	//ipv6_addr_copy(&ip6h->daddr, daddr);
+	ip6h->daddr = *daddr;
 
 	//if an unexpired source route option is present then the packet
 	//MUST instead be discarded, and an ICMPv4 "Destination

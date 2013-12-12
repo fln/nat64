@@ -1,3 +1,5 @@
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -7,6 +9,7 @@
 #include <linux/inetdevice.h>
 #include <linux/types.h>
 #include <linux/netfilter_ipv4.h>
+#include <linux/inet.h>
 
 #include <net/ip.h>
 #include <net/tcp.h>
@@ -41,7 +44,6 @@ struct expiry_q	expiry_base[NUM_EXPIRY_QUEUES] =
 	{{NULL, NULL}, 60}
 };
 
-struct net_device	*nat64_v4_dev;
 struct net_device	*nat64_dev;
 
 struct hlist_head	*hash6;
@@ -141,15 +143,8 @@ static void nat64_translate_6to4(struct sk_buff *old_skb, struct bib_entry *bib,
 
 	factory_translate_ip6(old_skb, skb, bib->local4_addr, proto);
 
-	if(nat64_v4_dev) {
-		if(route_ipv4_away(skb, bib->local4_port, dport))
-			kfree_skb(skb);
-	} else {
-		skb->dev = nat64_dev;
-		//nat64_dev->stats.rx_packets++;
-		//nat64_dev->stats.rx_bytes += skb->len;
-		netif_rx(skb);
-	}
+	skb->dev = nat64_dev;
+	netif_rx(skb);
 }
 
 /*static struct bib_entry *ipv6_bib_lookup__(struct in6_addr saddr, __be32 daddr, __be16 sport, __be16 dport, int type)
@@ -323,6 +318,8 @@ static void nat64_translate_4to6_deep(struct sk_buff *old_skb, struct bib_entry 
 	iph = (struct iphdr *)old_skb->data;
  	skb_pull(old_skb, iph->ihl * 4);
 
+	tcph = NULL;
+	udph = NULL;
 	switch(iph->protocol) {
 	case IPPROTO_UDP:
 		udph = (struct udphdr *)old_skb->data;
@@ -680,63 +677,7 @@ unsigned int nat64_ipv4_input(struct sk_buff *skb)
 			return nat64_handle_icmp4(skb, iph);
 			break;
 	}
-}
-
-static unsigned int nat64_ipv4_input_wrapper(	unsigned int hooknum,
-						struct sk_buff *skb,
-						const struct net_device *in,
-						const struct net_device *out,
-						int (*okfn)(struct sk_buff *))
-{
-	unsigned int 	ret = NF_ACCEPT;
-
-	if(skb->pkt_type != PACKET_HOST)
-		return NF_ACCEPT;
-
-	if (skb_linearize(skb) < 0) {
-		printk("nat64: Unable to lineralize incoming IPv4 packet X(.\n");
-		return NF_ACCEPT;
-	}
-
-	ret = nat64_ipv4_input(skb);
-
-	if(ret == NF_ACCEPT) {
-		skb_push(skb, ip_hdrlen(skb));
-		printk("nat64: [ipv4] Returning packet to netfiler chain.\n");
-	}
-	return ret;
-}
-
-static struct nf_hook_ops nat64_nf_hook __read_mostly =
-{
-	.hook		= nat64_ipv4_input_wrapper,
-	.owner		= THIS_MODULE,
-	.pf		= NFPROTO_IPV4,
-	.hooknum	= NF_INET_LOCAL_IN,
-	.priority	= NF_IP_PRI_NAT_SRC,
-};
-
-static struct net_device *find_netdev_by_ip(__u32 ip_address)
-{
-	struct net_device	*dev, *ret;
-	struct in_device	*in_dev;
-
-	ret = NULL;
-
-	rcu_read_lock();
-	for_each_netdev(&init_net, dev) {
-		in_dev = __in_dev_get_rtnl(dev);
-		for_ifa(in_dev) {
-			if(ifa->ifa_address == ip_address)
-				ret = dev;
-		} endfor_ifa(in_dev);
-
-		if(ret)
-			break;
-	}
-	rcu_read_unlock();
-
-	return ret;
+	return -1;
 }
 
 static int nat64_allocate_hash(unsigned int size)
@@ -816,7 +757,7 @@ static int __init nat64_init(void)
 	int ret = -1;
 	char	*pos;
 
-	printk("nat64: module loaded.\n");
+	pr_info("module loaded.\n");
 
 	if(!ipv4_address)
 	{
@@ -857,19 +798,7 @@ static int __init nat64_init(void)
 	}
 
 	printk("nat64: translating %s/%d to %s\n", prefix_address, prefix_len, ipv4_address);
-	nat64_v4_dev = find_netdev_by_ip(ipv4_addr);
-
-	if(nat64_v4_dev) {
-		printk("nat64: %pI4 belongs to %s interface. Switching to packet hijacking and self routing mode.\n", &ipv4_addr, nat64_v4_dev->name);
-		ret = nf_register_hook(&nat64_nf_hook);
-		if (ret) {
-			printk("NAT64: Unable to register netfilter hooks X(.\n");
-			ret = -1;
-			goto error;
-		}
-	}
-	else
-		printk("nat64: Packets will be transmitted via nat64 device.\n");
+	printk("nat64: Packets will be transmitted via nat64 device.\n");
 
 
 	if(nat64_allocate_hash(65536))
@@ -917,15 +846,12 @@ static void __exit nat64_exit(void)
 {
 	nat64_netdev_destroy(nat64_dev);
 
-	if(nat64_v4_dev)
-		nf_unregister_hook(&nat64_nf_hook);
-
 	nat64_free_hash();
 
 	kmem_cache_destroy(bib_cache);
 	kmem_cache_destroy(session_cache);
 
-	printk("nat64: module unloaded.\n");
+	pr_info("module unloaded.\n");
 }
 
 module_init(nat64_init);
