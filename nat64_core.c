@@ -24,11 +24,11 @@
 #include "nat64_session.h"
 #include "nat64_factory.h"
 
-#define NAT64_NETDEV_NAME "nat64"
+#define NAT64_NETDEV_NAME KBUILD_MODNAME
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Julius Kriukas <julius.kriukas@gmail.com>");
-MODULE_DESCRIPTION("Linux NAT64 implementation");
+MODULE_AUTHOR("Julius Kriukas <julius@kriukas.lt>");
+MODULE_DESCRIPTION("Linux NAT64 implementation (PLAT)");
 
 struct kmem_cache	*session_cache;
 struct kmem_cache	*bib_cache;
@@ -50,21 +50,20 @@ struct hlist_head	*hash6;
 struct hlist_head	*hash4;
 unsigned int		hash_size;
 
-__be32			ipv4_addr = 0;
-int			ipv4_prefixlen = 32;
-__be32			ipv4_netmask = 0xffffffff;
-static char			*ipv4_address = NULL;
-module_param(ipv4_address, charp, 0);
-MODULE_PARM_DESC(ipv4_address, "An IPv4 address or a subnet used by translator. Can be specified as a.b.c.d for single address or as a.b.c.d/p for a subnet.");
+__be32       ipv4_addr = 0;
+__be32       ipv4_netmask = 0xffffffff;
+int          ipv4_prefixlen = 32;
 
-struct in6_addr		prefix_base = {.s6_addr32[0] = 0, .s6_addr32[1] = 0, .s6_addr32[2] = 0, .s6_addr32[3] = 0};
-static char			*prefix_address = "0064:FF9B::";
-module_param(prefix_address, charp, 0);
-MODULE_PARM_DESC(prefix_len, "NAT64 prefix address (default 64:FF9B::)");
+static char *ipv4_prefix = NULL;
+module_param(ipv4_prefix, charp, 0);
+MODULE_PARM_DESC(ipv4_prefix, "IPv4 prefix (or address) used for NAT64 service, for example \"198.51.100.0/24\".");
 
-int			prefix_len = 96;
-module_param(prefix_len, int, 0);
-MODULE_PARM_DESC(prefix_len, "NAT64 prefix length (default /96)");
+struct in6_addr  prefix_base = {.s6_addr32[0] = 0, .s6_addr32[1] = 0, .s6_addr32[2] = 0, .s6_addr32[3] = 0};
+int              prefix_len = 96;
+
+static char     *ipv6_prefix = "64:ff9b::/96";
+module_param(ipv6_prefix, charp, 0);
+MODULE_PARM_DESC(ipv6_prefix, "IPv6 prefix used for NAT64 service address, default is \"64:ff9b::/96\".");
 
 static void clean_expired_sessions(struct list_head *queue)
 {
@@ -215,7 +214,7 @@ void inline nat64_handle_icmp6(struct sk_buff *skb, struct ipv6hdr *ip6h)
 	//printk("nat64: [icmp6] Forwarding ECHO, new_type = %d\n", new_type);
 }
 
-void nat64_ipv6_input(struct sk_buff *old_skb)
+int nat64_netdev_ipv6_input(struct sk_buff *old_skb)
 {
 	int	i;
 	struct ipv6hdr	*ip6h = ipv6_hdr(old_skb);
@@ -227,17 +226,17 @@ void nat64_ipv6_input(struct sk_buff *old_skb)
 
 	/* Skip empty or non IPv6 packets */
 	if(old_skb->len < sizeof(struct ipv6hdr) || ip6h->version != 6)
-		return;
+		return -1;
 
 	if (!(ipv6_addr_type(&ip6h->saddr) & IPV6_ADDR_UNICAST)) {//||
 	    //(!(ipv6_addr_type(&ip6h->daddr) & IPV6_ADDR_UNICAST))) {
 		printk("nat64: [ipv6] source address is not unicast.\n");
-		return;
+		return -1;
 	}
 
 	// Check if destination address falls into nat64 prefix
 	if(memcmp(&ip6h->daddr, &prefix_base, prefix_len / 8))
-		return;
+		return -1;
 
 	skb_pull(old_skb, sizeof(struct ipv6hdr));
 	proto = ip6h->nexthdr;
@@ -267,16 +266,17 @@ void nat64_ipv6_input(struct sk_buff *old_skb)
 		{
 			bib = bib_session_create(&ip6h->saddr, extract_ipv4(ip6h->daddr, prefix_len), tcph->source, tcph->dest, IPPROTO_TCP, TCP_TRANS);
 			if(!bib)
-				return;
+				return -1;
 
 			session = list_entry(bib->sessions.next, struct session_entry, list);
 			session->state = V6_SYN_RCV;
 		}
 		else
-			return;
+			return -1;
 
 		nat64_translate_6to4(old_skb, bib, tcph->dest, IPPROTO_TCP);
 		//nat64_generate_tcp(old_skb, ip6h, bib);
+		return 0;
 		break;
 	case NEXTHDR_UDP:
 		udph = (struct udphdr *)old_skb->data;
@@ -296,12 +296,15 @@ void nat64_ipv6_input(struct sk_buff *old_skb)
 
 
 		nat64_translate_6to4(old_skb, bib, udph->dest, IPPROTO_UDP);
+		return 0;
 		break;
 	case NEXTHDR_ICMP:
 		nat64_handle_icmp6(old_skb, ip6h);
+		return 0;
 		break;
 	default:
 		printk("nat64: [ipv6] Next header %d. Currently only TCP, UDP and ICMP6 is supported.\n", proto);
+		return -1;
 		break;
 	}
 }
@@ -653,12 +656,12 @@ static inline unsigned int nat64_handle_icmp4(struct sk_buff *skb, struct iphdr 
 	return NF_DROP;
 }
 
-unsigned int nat64_ipv4_input(struct sk_buff *skb)
+int nat64_netdev_ipv4_input(struct sk_buff *skb)
 {
 	struct iphdr	*iph = ip_hdr(skb);
 
 	if(skb->len < sizeof(struct iphdr) || iph->version != 4 || (iph->daddr & ipv4_netmask) != ipv4_addr)
-		return NF_ACCEPT;
+		return -1;
 
 	//printk("nat64: [ipv4] Got IPv4 packet (len %d).\n", skb->len);
 
@@ -668,14 +671,14 @@ unsigned int nat64_ipv4_input(struct sk_buff *skb)
 	switch(iph->protocol)
 	{
 		case IPPROTO_TCP:
-			return nat64_handle_tcp4(skb, iph);
-			break;
+			nat64_handle_tcp4(skb, iph);
+			return 0;
 		case IPPROTO_UDP:
-			return nat64_handle_udp4(skb, iph);
-			break;
+			nat64_handle_udp4(skb, iph);
+			return 0;
 		case IPPROTO_ICMP:
-			return nat64_handle_icmp4(skb, iph);
-			break;
+			nat64_handle_icmp4(skb, iph);
+			return 0;
 	}
 	return -1;
 }
@@ -754,81 +757,96 @@ static void nat64_free_hash(void)
 
 static int __init nat64_init(void)
 {
-	int ret = -1;
-	char	*pos;
+	int   ret = -1;
+	char *pos;
 
-	pr_info("module loaded.\n");
 
-	if(!ipv4_address)
-	{
-		printk("nat64: ipv4_address parameter is mandatory X(.\n");
+	if(!ipv4_prefix) {
+		pr_err("ipv4_prefix parameter is mandatory.\n");
 		ret = -1;
 		goto error;
 	}
 
-	ret = in4_pton(ipv4_address, -1, (u8 *)&ipv4_addr, '/', NULL);
-	if (!ret)
-	{
-		printk("nat64: ipv4 is malformed [%s] X(.\n", ipv4_address);
+	ret = in4_pton(ipv4_prefix, -1, (u8 *)&ipv4_addr, '/', NULL);
+	if (!ret) {
+		pr_err("IPv4 prefix is malformed: %s\n", ipv4_prefix);
 		ret = -1;
 		goto error;
 	}
-	pos = strchr(ipv4_address, '/');
-	if(pos)
-	{
+
+	pos = strchr(ipv4_prefix, '/');
+	if (pos) {
 		ipv4_prefixlen = simple_strtol(++pos, NULL, 10);
-		if(ipv4_prefixlen > 32 || ipv4_prefixlen < 1)
-		{
-			printk("nat64: ipv4 prefix is malformed [%s] X(.\n", ipv4_address);
+		if (ipv4_prefixlen > 32 || ipv4_prefixlen < 1) {
+			pr_err("IPv4 prefix length %d is illegal: %s\n",
+						ipv4_prefixlen,
+						ipv4_prefix);
 			ret = -1;
 			goto error;
 		}
 		ipv4_netmask = inet_make_mask(ipv4_prefixlen);
 		ipv4_addr = ipv4_addr & ipv4_netmask;
-		printk("nat64: using IPv4 subnet %pI4/%d (netmask %pI4).\n", &ipv4_addr, ipv4_prefixlen, &ipv4_netmask);
 	}
 
 
-	ret = in6_pton(prefix_address, -1, (u8 *)&prefix_base, '\0', NULL);
-	if (!ret)
-	{
-		printk("nat64: prefix address is malformed [%s] X(.\n", prefix_address);
+	ret = in6_pton(ipv6_prefix, -1, (u8 *)&prefix_base, '/', NULL);
+	if (!ret) {
+		pr_err("IPv6 prefix is malformed: %s\n", ipv6_prefix);
 		ret = -1;
 		goto error;
 	}
 
-	printk("nat64: translating %s/%d to %s\n", prefix_address, prefix_len, ipv4_address);
-	printk("nat64: Packets will be transmitted via nat64 device.\n");
+	pos = strchr(ipv6_prefix, '/');
+	if (pos) {
+		prefix_len = simple_strtol(++pos, NULL, 10);
+		if (prefix_len != 96 && prefix_len != 64
+				&& prefix_len != 56 && prefix_len != 48
+				&& prefix_len != 40 && prefix_len != 32) {	
+			pr_err("IPv6 prefix length %d is illegal, only 96, 64, 56, 48, 40 or 32 is allowed: %s\n", prefix_len, ipv6_prefix);
+			ret = -1;
+			goto error;
+		}
+	}
 
 
-	if(nat64_allocate_hash(65536))
-	{
-		printk("nat64: Unable to allocate memmory for hash table X(.\n");
+
+	if(nat64_allocate_hash(65536)) {
+		pr_err("Unable to allocate memmory for main hash table.\n");
 		ret = -ENOMEM;
 		goto error;
 	}
 
 	session_cache = kmem_cache_create("nat64_session", sizeof(struct session_entry), 0, 0, NULL);
 	if (!session_cache) {
-		printk(KERN_ERR "nat64: Unable to create session_entry slab cache\n");
+		pr_err("Unable to create session_entry slab cache.\n");
 		ret = -ENOMEM;
 		goto cache_error;
 	}
 
 	bib_cache = kmem_cache_create("nat64_bib", sizeof(struct bib_entry), 0, 0, NULL);
 	if (!bib_cache) {
-		printk(KERN_ERR "nat64: Unable to create bib_entry slab cache\n");
+		pr_err("Unable to create bib_entry slab cache.\n");
 		ret = -ENOMEM;
 		goto cache_bib_error;
 	}
 
 
-	ret = nat64_netdev_create(&nat64_dev);
-	if(ret)
-	{
-		printk(KERN_ERR "nat64: Unable to create nat64 device\n");
+	ret = nat64_netdev_create(&nat64_dev, NAT64_NETDEV_NAME);
+	if(ret) {
+		pr_err("Unable to create nat64 device\n");
 		goto dev_error;
 	}
+
+	pr_info("Module loaded.\n");
+
+	pr_info("Translating %pI6c/%d => ::/0 to %pI4/%d => 0.0.0.0/0\n",
+					&prefix_base, prefix_len,
+					&ipv4_addr, ipv4_prefixlen);
+	pr_info("Packets should be received and will be transmitted via nat64 device.\n");
+	pr_info("Please issue these commands:\n");
+	pr_info("\tip link set nat64 up\n");
+	pr_info("\tip route add %pI6c/%d dev nat64\n", &prefix_base, prefix_len);
+	pr_info("\tip route add %pI4/%d dev nat64\n", &ipv4_addr, ipv4_prefixlen);
 
 	return 0;
 
@@ -839,6 +857,7 @@ cache_bib_error:
 cache_error:
 	nat64_free_hash();
 error:
+	pr_info("Module is NOT loaded.\n");
 	return ret;
 }
 
@@ -851,7 +870,7 @@ static void __exit nat64_exit(void)
 	kmem_cache_destroy(bib_cache);
 	kmem_cache_destroy(session_cache);
 
-	pr_info("module unloaded.\n");
+	pr_info("Module unloaded.\n");
 }
 
 module_init(nat64_init);

@@ -77,10 +77,10 @@ extern int			ipv4_prefixlen;
 extern int			prefix_len;
 extern struct in6_addr		prefix_base;
 
-void nat64_ipv6_input(struct sk_buff *old_skb);
-unsigned int nat64_ipv4_input(struct sk_buff *skb);
+int nat64_netdev_ipv6_input(struct sk_buff *old_skb);
+int nat64_netdev_ipv4_input(struct sk_buff *old_skb);
 
-int nat64_netdev_create(struct net_device **dev);
+int nat64_netdev_create(struct net_device **dev, const char *name);
 void nat64_netdev_destroy(struct net_device *dev);
 
 static inline __be16 nat64_hash4(__be32 addr, __be16 port)

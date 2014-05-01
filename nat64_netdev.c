@@ -1,14 +1,15 @@
+/*
+ * nat64_netdev.c : code to crate virtual network iface
+ *
+ */
+
 #include <linux/if_arp.h>
 #include <linux/netdevice.h>
-#include <linux/route.h>
 #include <linux/skbuff.h>
-#include <net/ip6_fib.h>
-#include <net/ip6_route.h>
 #include <net/ipv6.h>
 
-#include "nat64.h"
-
-#define NAT64_NETDEV_NAME "nat64"
+int nat64_netdev_ipv4_input(struct sk_buff *skb);
+int nat64_netdev_ipv6_input(struct sk_buff *skb);
 
 static int nat64_netdev_up(struct net_device *dev);
 static int nat64_netdev_down(struct net_device *dev);
@@ -27,22 +28,7 @@ static const struct net_device_ops nat64_netdev_ops = {
 
 static int nat64_netdev_up(struct net_device *dev)
 {
-	/*struct fib6_config cfg = {
-		.fc_table = RT6_TABLE_MAIN,
-		.fc_metric = IP6_RT_PRIO_ADDRCONF,
-		.fc_ifindex = dev->ifindex,
-		.fc_expires = 0,
-		.fc_dst_len = prefix_len,
-		.fc_flags = RTF_UP | RTF_NONEXTHOP,
-		.fc_nlinfo.nl_net = dev_net(dev),
-		.fc_protocol = RTPROT_KERNEL,
-	};*/
-
 	netif_start_queue(dev);
-	/*printk("nat64: the device is going up, you shoud automagically add nat64 prefix route :).\n");
-	
-	ipv6_addr_copy(&cfg.fc_dst, &prefix_base);
-	ip6_route_add(&cfg);*/
 	return 0;
 }
 
@@ -56,12 +42,12 @@ static netdev_tx_t nat64_netdev_xmit(struct sk_buff *skb, struct net_device *dev
 {
 	switch(ntohs(skb->protocol)) {
 	case ETH_P_IP:
-		nat64_ipv4_input(skb);
+		nat64_netdev_ipv4_input(skb);
 		break;
 	case ETH_P_IPV6:
-		nat64_dev->stats.tx_packets++;
-		nat64_dev->stats.tx_bytes += skb->len;
-		nat64_ipv6_input(skb);
+		dev->stats.tx_packets++;
+		dev->stats.tx_bytes += skb->len;
+		nat64_netdev_ipv6_input(skb);
 		break;
 	}
 
@@ -69,17 +55,9 @@ static netdev_tx_t nat64_netdev_xmit(struct sk_buff *skb, struct net_device *dev
 	return NETDEV_TX_OK;
 }
 
-/*static void *nat64_netdev_free(struct net_device *dev)
-{
-	// Free private data???
-} */
-
 static void nat64_netdev_setup(struct net_device *dev)
 {
-//      struct nat64_netdev_private *nat64 = netdev_priv(dev);
-
 	dev->netdev_ops = &nat64_netdev_ops;
-//	dev->destructor = nat64_netdev_free;
 
 	dev->type = ARPHRD_NONE;
 	dev->hard_header_len = 0;
@@ -89,32 +67,26 @@ static void nat64_netdev_setup(struct net_device *dev)
 	dev->flags = IFF_NOARP | IFF_POINTOPOINT;
 }
 
-int nat64_netdev_create(struct net_device **dev)
+int nat64_netdev_create(struct net_device **dev, const char *name)
 {
 	int ret = 0;
-	//dev = alloc_netdev(sizeof(struct nat64_netdev_priv), NAT64_NETDEV_NAME, nat64_netdev_setup);
-	*dev = alloc_netdev(0, NAT64_NETDEV_NAME, nat64_netdev_setup);
 
-	if (!*dev) {
-		printk("nat64: Unable to allocate nat64 device. Not enough memory X(.\n");
+	*dev = alloc_netdev(0, name, nat64_netdev_setup);
+
+	if (!*dev)
 		return -ENOMEM;
-	}
 
 	ret = register_netdev(*dev);
 	if(ret) {
-		printk("nat64: Unable to register nat64 device X(.\n");
 		free_netdev(*dev);
 		return ret;
 	}
 
-	printk("nat64: netdevice created successfully.\n");
 	return ret;
 }
 
 void nat64_netdev_destroy(struct net_device *dev)
 {
 	unregister_netdev(dev);
-
-	printk("nat64: Destroying nat64 device.\n");
 }
 
