@@ -130,7 +130,7 @@ static inline int bib_allocate_local4_port(__be32 addr, __be16 port, int type)
 
 
 	for (i = port; i <= max; i += 2, flag = 0) {
-		hlist_for_each(node, &hash4[htons(i)]) {
+		hlist_for_each(node, &state.hash4[htons(i)]) {
 			entry = hlist_entry(node, struct bib_entry, bylocal);
 			if(entry->type == type && entry->local4_addr == addr) {
 				flag = 1;
@@ -143,7 +143,7 @@ static inline int bib_allocate_local4_port(__be32 addr, __be16 port, int type)
 
 	flag = 0;
 	for (i = port - 2; i >= min; i -=2, flag = 0) {
-		hlist_for_each(node, &hash4[htons(i)]) {
+		hlist_for_each(node, &state.hash4[htons(i)]) {
 			entry = hlist_entry(node, struct bib_entry, bylocal);
 			if(entry->type == type && entry->local4_addr == addr) {
 				flag = 1;
@@ -177,7 +177,7 @@ struct bib_entry *bib_ipv6_lookup(struct in6_addr *remote_addr, __be16 remote_po
 	struct hlist_node	*pos;
 	struct bib_entry	*bib;
 	__be16 			h = nat64_hash6(*remote_addr, remote_port);
-	struct hlist_head	*hlist = &hash6[h];
+	struct hlist_head	*hlist = &state.hash6[h];
 
 	hlist_for_each(pos, hlist) {
 		bib = hlist_entry(pos, struct bib_entry, byremote);
@@ -194,7 +194,7 @@ struct bib_entry *bib_ipv4_lookup(__be32 local_addr, __be16 local_port, int type
 	struct hlist_node	*pos;
 	struct bib_entry	*bib;
 	__be16			h = nat64_hash4(local_addr, local_port);
-	struct hlist_head	*hlist = &hash4[h];
+	struct hlist_head	*hlist = &state.hash4[h];
 
 
 	hlist_for_each(pos, hlist) {
@@ -212,7 +212,7 @@ struct bib_entry *bib_create(struct in6_addr *remote6_addr, __be16 remote6_port,
 {
 	struct bib_entry	*bib;
 
-	bib = kmem_cache_zalloc(bib_cache, GFP_ATOMIC);
+	bib = kmem_cache_zalloc(state.bib_cache, GFP_ATOMIC);
 	if (!bib) {
 		printk("nat64: [bib] Unable to allocate memory for new bib entry X(.\n");
 		return NULL;
@@ -247,12 +247,12 @@ struct bib_entry *bib_session_create(struct in6_addr *saddr, __be32 daddr, __be1
 	if (!bib)
 		return NULL;
 
-	hlist_add_head(&bib->byremote, &hash6[nat64_hash6(*saddr, sport)]);
-	hlist_add_head(&bib->bylocal, &hash4[local4_port]);
+	hlist_add_head(&bib->byremote, &state.hash6[nat64_hash6(*saddr, sport)]);
+	hlist_add_head(&bib->bylocal, &state.hash4[local4_port]);
 
 	session = session_create(bib, daddr, dport, type);
 	if(!session) {
-		kmem_cache_free(bib_cache, bib);
+		kmem_cache_free(state.bib_cache, bib);
 		return NULL;
 	}
 
@@ -276,16 +276,16 @@ struct session_entry *session_ipv4_lookup(struct bib_entry *bib, __be32 remote4_
 void session_renew(struct session_entry *session, enum expiry_type type)
 {
 	list_del(&session->byexpiry);
-	session->expires = jiffies + expiry_base[type].timeout*HZ;
-	list_add_tail(&session->byexpiry, &expiry_base[type].queue);
-	//printk("nat64: [session] Renewing session %pI4:%hu (timeout %u sec).\n", &session->remote4_addr, ntohs(session->remote4_port), expiry_base[type].timeout);
+	session->expires = jiffies + state.expiry_base[type].timeout*HZ;
+	list_add_tail(&session->byexpiry, &state.expiry_base[type].queue);
+	//printk("nat64: [session] Renewing session %pI4:%hu (timeout %u sec).\n", &session->remote4_addr, ntohs(session->remote4_port), state.expiry_base[type].timeout);
 }
 
 struct session_entry *session_create(struct bib_entry *bib, __be32 addr, __be16 port, enum expiry_type type)
 {
 	struct session_entry *s;
 
-	s = kmem_cache_zalloc(session_cache, GFP_ATOMIC);
+	s = kmem_cache_zalloc(state.session_cache, GFP_ATOMIC);
 	if(!s) {
 		printk("nat64: [session] Unable to allocate memory for new session entry X(.\n");
 		return NULL;
@@ -295,10 +295,10 @@ struct session_entry *session_create(struct bib_entry *bib, __be32 addr, __be16 
 	s->remote4_port = port;
 	list_add(&s->list, &bib->sessions);
 
-	s->expires = jiffies + expiry_base[type].timeout*HZ;
-	list_add_tail(&s->byexpiry, &expiry_base[type].queue);
+	s->expires = jiffies + state.expiry_base[type].timeout*HZ;
+	list_add_tail(&s->byexpiry, &state.expiry_base[type].queue);
 
-//	printk("nat64: [session] New session %pI4:%hu (timeout %u sec).\n", &addr, ntohs(port), expiry_base[type].timeout);
+//	printk("nat64: [session] New session %pI4:%hu (timeout %u sec).\n", &addr, ntohs(port), state.expiry_base[type].timeout);
 
 	return s;
 }

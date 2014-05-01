@@ -30,36 +30,36 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Julius Kriukas <julius@kriukas.lt>");
 MODULE_DESCRIPTION("Linux NAT64 implementation (PLAT)");
 
-struct kmem_cache	*session_cache;
-struct kmem_cache	*bib_cache;
+struct nat64_state state = {
+	.session_cache = NULL,
+	.bib_cache     = NULL,
+	//.expiry_queue  = LIST_HEAD_INIT(state.expiry_queue),
+	.expiry_base   = {
+		// List heads are initialized in nat64_allocate_hash()
+		{.queue = {NULL, NULL}, .timeout = 5*60},    // UDP_DEFAULT
+		{.queue = {NULL, NULL}, .timeout = 4*60},    // TCP_TRANS
+		{.queue = {NULL, NULL}, .timeout = 2*60*60}, // TCP_EST
+		{.queue = {NULL, NULL}, .timeout = 6},       // TCP_INCOMING_SYN
+		{.queue = {NULL, NULL}, .timeout = 60},      // ICMP_DEFAULT
+	},
 
-struct list_head	exipry_queue = LIST_HEAD_INIT(exipry_queue);
+	.hash_size      = 0,
+	.hash6          = NULL,
+	.hash4          = NULL,
 
-struct expiry_q	expiry_base[NUM_EXPIRY_QUEUES] =
-{
-	{{NULL, NULL}, 5*60},
-	{{NULL, NULL}, 4*60},
-	{{NULL, NULL}, 2*60*60},
-	{{NULL, NULL}, 6},
-	{{NULL, NULL}, 60}
+	.nat64_dev      = NULL,
+
+	.ipv4_addr      = 0,
+	.ipv4_netmask   = 0xffffffff,
+	.ipv4_prefixlen = 32,
+
+	.prefix_base    = {.s6_addr32[0] = 0, .s6_addr32[1] = 0, .s6_addr32[2] = 0, .s6_addr32[3] = 0},
+	.prefix_len     = 96,
 };
-
-struct net_device	*nat64_dev;
-
-struct hlist_head	*hash6;
-struct hlist_head	*hash4;
-unsigned int		hash_size;
-
-__be32       ipv4_addr = 0;
-__be32       ipv4_netmask = 0xffffffff;
-int          ipv4_prefixlen = 32;
 
 static char *ipv4_prefix = NULL;
 module_param(ipv4_prefix, charp, 0);
 MODULE_PARM_DESC(ipv4_prefix, "IPv4 prefix (or address) used for NAT64 service, for example \"198.51.100.0/24\".");
-
-struct in6_addr  prefix_base = {.s6_addr32[0] = 0, .s6_addr32[1] = 0, .s6_addr32[2] = 0, .s6_addr32[3] = 0};
-int              prefix_len = 96;
 
 static char     *ipv6_prefix = "64:ff9b::/96";
 module_param(ipv6_prefix, charp, 0);
@@ -89,9 +89,9 @@ static void clean_expired_sessions(struct list_head *queue)
 				//printk("nat64: [garbage-collector] removing bib %pI6c,%hu <--> %pI4:%hu\n", &bib->remote6_addr, ntohs(bib->remote6_port), &bib->local4_addr, ntohs(bib->local4_port));
 				hlist_del(&bib->byremote);
 				hlist_del(&bib->bylocal);
-				kmem_cache_free(bib_cache, bib);
+				kmem_cache_free(state.bib_cache, bib);
 			}
-			kmem_cache_free(session_cache, session);
+			kmem_cache_free(state.session_cache, session);
 		}
 		else
 		    break;
@@ -142,7 +142,7 @@ static void nat64_translate_6to4(struct sk_buff *old_skb, struct bib_entry *bib,
 
 	factory_translate_ip6(old_skb, skb, bib->local4_addr, proto);
 
-	skb->dev = nat64_dev;
+	skb->dev = state.nat64_dev;
 	netif_rx(skb);
 }
 
@@ -189,15 +189,15 @@ void inline nat64_handle_icmp6(struct sk_buff *skb, struct ipv6hdr *ip6h)
 
 		bib = bib_ipv6_lookup(&ip6h->saddr, icmph->un.echo.id, IPPROTO_ICMP);
 		if(bib) {
-			session = session_ipv4_lookup(bib, extract_ipv4(ip6h->daddr, prefix_len), icmph->un.echo.id);
+			session = session_ipv4_lookup(bib, extract_ipv4(ip6h->daddr, state.prefix_len), icmph->un.echo.id);
 
 			if(session)
 				session_renew(session, ICMP_DEFAULT);
 			else
-				session = session_create(bib, extract_ipv4(ip6h->daddr, prefix_len), icmph->un.echo.id, ICMP_DEFAULT);
+				session = session_create(bib, extract_ipv4(ip6h->daddr, state.prefix_len), icmph->un.echo.id, ICMP_DEFAULT);
 		}
 		else
-			bib = bib_session_create(&ip6h->saddr, extract_ipv4(ip6h->daddr, prefix_len), icmph->un.echo.id, icmph->un.echo.id, IPPROTO_ICMP, ICMP_DEFAULT);
+			bib = bib_session_create(&ip6h->saddr, extract_ipv4(ip6h->daddr, state.prefix_len), icmph->un.echo.id, icmph->un.echo.id, IPPROTO_ICMP, ICMP_DEFAULT);
 
 		nat64_translate_6to4(skb, bib, new_type, IPPROTO_ICMP);
 	} else {
@@ -235,7 +235,7 @@ int nat64_netdev_ipv6_input(struct sk_buff *old_skb)
 	}
 
 	// Check if destination address falls into nat64 prefix
-	if(memcmp(&ip6h->daddr, &prefix_base, prefix_len / 8))
+	if(memcmp(&ip6h->daddr, &state.prefix_base, state.prefix_len / 8))
 		return -1;
 
 	skb_pull(old_skb, sizeof(struct ipv6hdr));
@@ -244,9 +244,9 @@ int nat64_netdev_ipv6_input(struct sk_buff *old_skb)
 	//printk("NAT64: Incoming packet properties: [nexthdr = %d] [payload_len = %d] [old_skb->len = %d]\n", ip6h->nexthdr, ntohs(ip6h->payload_len), old_skb->len);
 	//pr_debug("NAT64: Target registration information min_ip = %d, max_ip = %d\n", info->min_ip, info->max_ip);
 
-	clean_expired_sessions(&exipry_queue);
+	//clean_expired_sessions(&state.expiry_queue);
 	for (i = 0; i < NUM_EXPIRY_QUEUES; i++)
-		clean_expired_sessions(&expiry_base[i].queue);
+		clean_expired_sessions(&state.expiry_base[i].queue);
 
 	switch(proto) {
 	case NEXTHDR_TCP:
@@ -255,16 +255,16 @@ int nat64_netdev_ipv6_input(struct sk_buff *old_skb)
 
 		bib = bib_ipv6_lookup(&ip6h->saddr, tcph->source, IPPROTO_TCP);
 		if(bib) {
-			session = session_ipv4_lookup(bib, extract_ipv4(ip6h->daddr, prefix_len), tcph->dest);
+			session = session_ipv4_lookup(bib, extract_ipv4(ip6h->daddr, state.prefix_len), tcph->dest);
 
 			if(session)
 				tcp6_fsm(session, tcph);
 			else
-				session = session_create(bib, extract_ipv4(ip6h->daddr, prefix_len), tcph->dest, TCP_TRANS);
+				session = session_create(bib, extract_ipv4(ip6h->daddr, state.prefix_len), tcph->dest, TCP_TRANS);
 		}
 		else if(tcph->syn)
 		{
-			bib = bib_session_create(&ip6h->saddr, extract_ipv4(ip6h->daddr, prefix_len), tcph->source, tcph->dest, IPPROTO_TCP, TCP_TRANS);
+			bib = bib_session_create(&ip6h->saddr, extract_ipv4(ip6h->daddr, state.prefix_len), tcph->source, tcph->dest, IPPROTO_TCP, TCP_TRANS);
 			if(!bib)
 				return -1;
 
@@ -284,15 +284,15 @@ int nat64_netdev_ipv6_input(struct sk_buff *old_skb)
 
 		bib = bib_ipv6_lookup(&ip6h->saddr, udph->source, IPPROTO_UDP);
 		if(bib) {
-			session = session_ipv4_lookup(bib, extract_ipv4(ip6h->daddr, prefix_len), udph->dest);
+			session = session_ipv4_lookup(bib, extract_ipv4(ip6h->daddr, state.prefix_len), udph->dest);
 
 			if(session)
 				session_renew(session, UDP_DEFAULT);
 			else
-				session = session_create(bib, extract_ipv4(ip6h->daddr, prefix_len), udph->dest, UDP_DEFAULT);
+				session = session_create(bib, extract_ipv4(ip6h->daddr, state.prefix_len), udph->dest, UDP_DEFAULT);
 		}
 		else
-			bib = bib_session_create(&ip6h->saddr, extract_ipv4(ip6h->daddr, prefix_len), udph->source, udph->dest, IPPROTO_UDP, UDP_DEFAULT);
+			bib = bib_session_create(&ip6h->saddr, extract_ipv4(ip6h->daddr, state.prefix_len), udph->source, udph->dest, IPPROTO_UDP, UDP_DEFAULT);
 
 
 		nat64_translate_6to4(old_skb, bib, udph->dest, IPPROTO_UDP);
@@ -364,9 +364,9 @@ static void nat64_translate_4to6_deep(struct sk_buff *old_skb, struct bib_entry 
 	assemble_ipv6(&remote6, ip_hdr(old_skb)->saddr);
 	factory_translate_ip4(old_skb, skb, &remote6, &bib->remote6_addr, IPPROTO_ICMPV6, ip_hdrlen(old_skb));
 
-	skb->dev = nat64_dev;
-	nat64_dev->stats.rx_packets++;
-	nat64_dev->stats.rx_bytes += skb->len;
+	skb->dev = state.nat64_dev;
+	state.nat64_dev->stats.rx_packets++;
+	state.nat64_dev->stats.rx_bytes += skb->len;
 	netif_rx(skb);
 
 //	printk("nat64: [ipv4] Sending translated IPv6 packet.\n");
@@ -414,9 +414,9 @@ static void nat64_translate_4to6(struct sk_buff *old_skb, struct bib_entry *bib,
 	assemble_ipv6(&remote6, ip_hdr(old_skb)->saddr);
 	factory_translate_ip4(old_skb, skb, &remote6, &bib->remote6_addr, proto, ip_hdrlen(old_skb));
 
-	skb->dev = nat64_dev;
-	nat64_dev->stats.rx_packets++;
-	nat64_dev->stats.rx_bytes += skb->len;
+	skb->dev = state.nat64_dev;
+	state.nat64_dev->stats.rx_packets++;
+	state.nat64_dev->stats.rx_bytes += skb->len;
 	netif_rx(skb);
 
 //	printk("nat64: [ipv4] Sending translated IPv6 packet.\n");
@@ -660,7 +660,7 @@ int nat64_netdev_ipv4_input(struct sk_buff *skb)
 {
 	struct iphdr	*iph = ip_hdr(skb);
 
-	if(skb->len < sizeof(struct iphdr) || iph->version != 4 || (iph->daddr & ipv4_netmask) != ipv4_addr)
+	if(skb->len < sizeof(struct iphdr) || iph->version != 4 || (iph->daddr & state.ipv4_netmask) != state.ipv4_addr)
 		return -1;
 
 	//printk("nat64: [ipv4] Got IPv4 packet (len %d).\n", skb->len);
@@ -688,37 +688,38 @@ static int nat64_allocate_hash(unsigned int size)
 	int			i;
 	//struct hlist_head	*hash;
 
-	size = roundup(size, PAGE_SIZE / sizeof(struct hlist_head));
-	hash_size = size;
+	//size = roundup(size, PAGE_SIZE / sizeof(struct hlist_head));
+	//size = roundup(size, PAGE_SIZE);
+	state.hash_size = size;
 	//nat64_data.vmallocked = 0;
 
-	hash4 = (void *)__get_free_pages(GFP_KERNEL|__GFP_NOWARN,
-	                                           get_order(sizeof(struct hlist_head) * size));
+	state.hash4 = (void *)__get_free_pages(GFP_KERNEL|__GFP_NOWARN,
+	                                           get_order(sizeof(struct hlist_head) * state.hash_size));
 
-	if(!hash4) {
+	if(!state.hash4) {
 		printk("nat64: Unable to allocate memory for hash4 via gfp X(.\n");
 		return -1;
 		//hash = vmalloc(sizeof(struct hlist_head) * size);
 		//nat64_data.vmallocked = 1;
 	}
 
-	hash6 = (void *)__get_free_pages(GFP_KERNEL|__GFP_NOWARN,
-	                                           get_order(sizeof(struct hlist_head) * size));
-	if(!hash6) {
+	state.hash6 = (void *)__get_free_pages(GFP_KERNEL|__GFP_NOWARN,
+	                                           get_order(sizeof(struct hlist_head) * state.hash_size));
+	if(!state.hash6) {
 		printk("nat64: Unable to allocate memory for hash6 via gfp X(.\n");
-		free_pages((unsigned long)hash4,
-			get_order(sizeof(struct hlist_head) * hash_size));
+		free_pages((unsigned long)state.hash4,
+			get_order(sizeof(struct hlist_head) * state.hash_size));
 		return -1;
 	}
 
-	for (i = 0; i < size; i++)
+	for (i = 0; i < state.hash_size; i++)
 	{
-		INIT_HLIST_HEAD(&hash4[i]);
-		INIT_HLIST_HEAD(&hash6[i]);
+		INIT_HLIST_HEAD(&state.hash4[i]);
+		INIT_HLIST_HEAD(&state.hash6[i]);
 	}
 
 	for (i = 0; i < NUM_EXPIRY_QUEUES; i++)
-		INIT_LIST_HEAD(&expiry_base[i].queue);
+		INIT_LIST_HEAD(&state.expiry_base[i].queue);
 
 	return 0;
 }
@@ -731,28 +732,28 @@ static void nat64_free_hash(void)
 	struct list_head	*pos;
 	struct list_head	*temp;
 
-	for(i = 0; i < hash_size; i++)
+	for(i = 0; i < state.hash_size; i++)
 	{
-		if(!hlist_empty(&hash6[i]))
+		if(!hlist_empty(&state.hash6[i]))
 		{
-			bib = hlist_entry((&hash6[i])->first, struct bib_entry, byremote);
+			bib = hlist_entry((&state.hash6[i])->first, struct bib_entry, byremote);
 
 			list_for_each_safe(pos, temp, &bib->sessions) {
 				session = list_entry(pos, struct session_entry, list);
 				//printk("nat64: [session] removing session %pI4:%hu.\n", &session->remote4_addr,	ntohs(session->remote4_port));
-				kmem_cache_free(session_cache, session);
+				kmem_cache_free(state.session_cache, session);
 			}
 			printk("nat64: [bib] removing bib %pI6c,%hu <--> %pI4:%hu.\n", &bib->remote6_addr, ntohs(bib->remote6_port), &bib->local4_addr, ntohs(bib->local4_port));
-			kmem_cache_free(bib_cache, bib);
+			kmem_cache_free(state.bib_cache, bib);
 		}
-		//if(&hash6[i])
-		//	kmem_cache_free(bib_cache, &hash6[i]);
+		//if(&state.hash6[i])
+		//	kmem_cache_free(state.bib_cache, &state.hash6[i]);
 	}
 
-	free_pages((unsigned long)hash4,
-		get_order(sizeof(struct hlist_head) * hash_size));
-	free_pages((unsigned long)hash6,
-		get_order(sizeof(struct hlist_head) * hash_size));
+	free_pages((unsigned long)state.hash4,
+		get_order(sizeof(struct hlist_head) * state.hash_size));
+	free_pages((unsigned long)state.hash6,
+		get_order(sizeof(struct hlist_head) * state.hash_size));
 }
 
 static int __init nat64_init(void)
@@ -767,7 +768,7 @@ static int __init nat64_init(void)
 		goto error;
 	}
 
-	ret = in4_pton(ipv4_prefix, -1, (u8 *)&ipv4_addr, '/', NULL);
+	ret = in4_pton(ipv4_prefix, -1, (u8 *)&state.ipv4_addr, '/', NULL);
 	if (!ret) {
 		pr_err("IPv4 prefix is malformed: %s\n", ipv4_prefix);
 		ret = -1;
@@ -776,20 +777,20 @@ static int __init nat64_init(void)
 
 	pos = strchr(ipv4_prefix, '/');
 	if (pos) {
-		ipv4_prefixlen = simple_strtol(++pos, NULL, 10);
-		if (ipv4_prefixlen > 32 || ipv4_prefixlen < 1) {
+		state.ipv4_prefixlen = simple_strtol(++pos, NULL, 10);
+		if (state.ipv4_prefixlen > 32 || state.ipv4_prefixlen < 1) {
 			pr_err("IPv4 prefix length %d is illegal: %s\n",
-						ipv4_prefixlen,
+						state.ipv4_prefixlen,
 						ipv4_prefix);
 			ret = -1;
 			goto error;
 		}
-		ipv4_netmask = inet_make_mask(ipv4_prefixlen);
-		ipv4_addr = ipv4_addr & ipv4_netmask;
+		state.ipv4_netmask = inet_make_mask(state.ipv4_prefixlen);
+		state.ipv4_addr = state.ipv4_addr & state.ipv4_netmask;
 	}
 
 
-	ret = in6_pton(ipv6_prefix, -1, (u8 *)&prefix_base, '/', NULL);
+	ret = in6_pton(ipv6_prefix, -1, (u8 *)&state.prefix_base, '/', NULL);
 	if (!ret) {
 		pr_err("IPv6 prefix is malformed: %s\n", ipv6_prefix);
 		ret = -1;
@@ -798,11 +799,11 @@ static int __init nat64_init(void)
 
 	pos = strchr(ipv6_prefix, '/');
 	if (pos) {
-		prefix_len = simple_strtol(++pos, NULL, 10);
-		if (prefix_len != 96 && prefix_len != 64
-				&& prefix_len != 56 && prefix_len != 48
-				&& prefix_len != 40 && prefix_len != 32) {	
-			pr_err("IPv6 prefix length %d is illegal, only 96, 64, 56, 48, 40 or 32 is allowed: %s\n", prefix_len, ipv6_prefix);
+		state.prefix_len = simple_strtol(++pos, NULL, 10);
+		if (state.prefix_len != 96 && state.prefix_len != 64
+				&& state.prefix_len != 56 && state.prefix_len != 48
+				&& state.prefix_len != 40 && state.prefix_len != 32) {	
+			pr_err("IPv6 prefix length %d is illegal, only 96, 64, 56, 48, 40 or 32 is allowed: %s\n", state.prefix_len, ipv6_prefix);
 			ret = -1;
 			goto error;
 		}
@@ -816,22 +817,22 @@ static int __init nat64_init(void)
 		goto error;
 	}
 
-	session_cache = kmem_cache_create("nat64_session", sizeof(struct session_entry), 0, 0, NULL);
-	if (!session_cache) {
+	state.session_cache = kmem_cache_create("nat64_session", sizeof(struct session_entry), 0, 0, NULL);
+	if (!state.session_cache) {
 		pr_err("Unable to create session_entry slab cache.\n");
 		ret = -ENOMEM;
 		goto cache_error;
 	}
 
-	bib_cache = kmem_cache_create("nat64_bib", sizeof(struct bib_entry), 0, 0, NULL);
-	if (!bib_cache) {
+	state.bib_cache = kmem_cache_create("nat64_bib", sizeof(struct bib_entry), 0, 0, NULL);
+	if (!state.bib_cache) {
 		pr_err("Unable to create bib_entry slab cache.\n");
 		ret = -ENOMEM;
 		goto cache_bib_error;
 	}
 
 
-	ret = nat64_netdev_create(&nat64_dev, NAT64_NETDEV_NAME);
+	ret = nat64_netdev_create(&state.nat64_dev, NAT64_NETDEV_NAME);
 	if(ret) {
 		pr_err("Unable to create nat64 device\n");
 		goto dev_error;
@@ -840,20 +841,20 @@ static int __init nat64_init(void)
 	pr_info("Module loaded.\n");
 
 	pr_info("Translating %pI6c/%d => ::/0 to %pI4/%d => 0.0.0.0/0\n",
-					&prefix_base, prefix_len,
-					&ipv4_addr, ipv4_prefixlen);
+					&state.prefix_base, state.prefix_len,
+					&state.ipv4_addr, state.ipv4_prefixlen);
 	pr_info("Packets should be received and will be transmitted via nat64 device.\n");
 	pr_info("Please issue these commands:\n");
 	pr_info("\tip link set nat64 up\n");
-	pr_info("\tip route add %pI6c/%d dev nat64\n", &prefix_base, prefix_len);
-	pr_info("\tip route add %pI4/%d dev nat64\n", &ipv4_addr, ipv4_prefixlen);
+	pr_info("\tip route add %pI6c/%d dev nat64\n", &state.prefix_base, state.prefix_len);
+	pr_info("\tip route add %pI4/%d dev nat64\n", &state.ipv4_addr, state.ipv4_prefixlen);
 
 	return 0;
 
 dev_error:
-	kmem_cache_destroy(bib_cache);
+	kmem_cache_destroy(state.bib_cache);
 cache_bib_error:
-	kmem_cache_destroy(session_cache);
+	kmem_cache_destroy(state.session_cache);
 cache_error:
 	nat64_free_hash();
 error:
@@ -863,12 +864,12 @@ error:
 
 static void __exit nat64_exit(void)
 {
-	nat64_netdev_destroy(nat64_dev);
+	nat64_netdev_destroy(state.nat64_dev);
 
 	nat64_free_hash();
 
-	kmem_cache_destroy(bib_cache);
-	kmem_cache_destroy(session_cache);
+	kmem_cache_destroy(state.bib_cache);
+	kmem_cache_destroy(state.session_cache);
 
 	pr_info("Module unloaded.\n");
 }

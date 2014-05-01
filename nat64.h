@@ -58,24 +58,27 @@ struct session_entry
 	__be16			remote4_port;
 };
 
-extern struct expiry_q	expiry_base[NUM_EXPIRY_QUEUES];
+struct nat64_state {
+	struct kmem_cache *session_cache;
+	struct kmem_cache *bib_cache;
 
-extern struct kmem_cache	*session_cache;
-extern struct kmem_cache	*bib_cache;
-extern struct list_head		exipry_queue;
-//extern struct net_device	*nat64_v4_dev;
-extern struct net_device	*nat64_dev;
+	struct expiry_q	   expiry_base[NUM_EXPIRY_QUEUES];
 
-extern struct hlist_head	*hash6;
-extern struct hlist_head	*hash4;
-extern unsigned int		hash_size;
+	unsigned int       hash_size;
+	struct hlist_head *hash6;
+	struct hlist_head *hash4;
 
-extern __be32			ipv4_addr;
-extern __be32			ipv4_netmask;
-extern int			ipv4_prefixlen;
+	struct net_device *nat64_dev;
 
-extern int			prefix_len;
-extern struct in6_addr		prefix_base;
+	__be32             ipv4_addr;
+	__be32             ipv4_netmask;
+	int                ipv4_prefixlen;
+
+	int                prefix_len;
+	struct in6_addr    prefix_base;
+};
+
+extern struct nat64_state state;
 
 int nat64_netdev_ipv6_input(struct sk_buff *old_skb);
 int nat64_netdev_ipv4_input(struct sk_buff *old_skb);
@@ -98,9 +101,9 @@ static inline __be16 nat64_hash6(struct in6_addr addr6, __be16 port)
 static inline __be32 map_6to4(struct in6_addr *addr6)
 {
 	__be32 addr_hash = addr6->s6_addr32[0] ^ addr6->s6_addr32[1] ^ addr6->s6_addr32[2] ^ addr6->s6_addr32[3];
-	__be32 addr4 = htonl(ntohl(ipv4_addr) + (addr_hash % (1<<(32 - ipv4_prefixlen))));
+	__be32 addr4 = htonl(ntohl(state.ipv4_addr) + (addr_hash % (1<<(32 - state.ipv4_prefixlen))));
 
-//	printk("nat64: [inline] map_6to4 %pI6c mod %pI4/%d -> %pI4 + %d -> %pI4\n", addr6, &ipv4_addr, ipv4_prefixlen, &ipv4_addr, (addr_hash % (1<<(32 - ipv4_prefixlen))), &addr4);
+//	printk("nat64: [inline] map_6to4 %pI6c mod %pI4/%d -> %pI4 + %d -> %pI4\n", addr6, &state.ipv4_addr, state.ipv4_prefixlen, &state.ipv4_addr, (addr_hash % (1<<(32 - state.ipv4_prefixlen))), &addr4);
 	return addr4;
 }
 
@@ -126,8 +129,8 @@ static inline __be32 extract_ipv4(struct in6_addr addr, int prefix)
 
 static inline void assemble_ipv6(struct in6_addr *dest, __be32 addr)
 {
-	memcpy(dest, &prefix_base, sizeof(prefix_base));
-	switch(prefix_len) {
+	memcpy(dest, &state.prefix_base, sizeof(state.prefix_base));
+	switch(state.prefix_len) {
 	case 96:
 		dest->s6_addr32[3] = addr;
 		break;
