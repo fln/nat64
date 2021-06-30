@@ -71,7 +71,7 @@ int nat64_netdev_create(struct net_device **dev, const char *name)
 {
 	int ret = 0;
 
-	*dev = alloc_netdev(0, name, nat64_netdev_setup);
+	*dev = alloc_netdev(0, name, NET_NAME_UNKNOWN, nat64_netdev_setup);
 
 	if (!*dev)
 		return -ENOMEM;
